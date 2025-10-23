@@ -48,7 +48,6 @@ cuda_skip = {
     "TestQuantized.test_qmm_shapes",
     "TestQuantized.test_qmm_vjp",
     "TestQuantized.test_qmv",
-    "TestQuantized.test_mxfp4_qmv",
     "TestQuantized.test_mxfp4_qvm",
     "TestQuantized.test_qvm",
     "TestQuantized.test_qvm_splitk",
