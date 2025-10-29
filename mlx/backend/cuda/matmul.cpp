@@ -18,9 +18,9 @@ std::tuple<bool, int64_t, array>
 check_transpose(cu::CommandEncoder& enc, const Stream& s, const array& arr) {
   auto stx = arr.strides()[arr.ndim() - 2];
   auto sty = arr.strides()[arr.ndim() - 1];
-  if (sty == 1 && stx == arr.shape(-1)) {
+  if (sty == 1 && stx >= arr.shape(-1)) {
     return std::make_tuple(false, stx, arr);
-  } else if (stx == 1 && sty == arr.shape(-2)) {
+  } else if (stx == 1 && sty >= arr.shape(-2)) {
     return std::make_tuple(true, sty, arr);
   } else {
     array arr_copy = contiguous_copy_gpu(arr, s);
@@ -62,6 +62,7 @@ void gemm_and_bias(
 
   // Use gemmv when possible
   if (!bias && cu::can_use_gemv(M, N, K, a_transposed, b_transposed)) {
+    out.set_data(allocator::malloc(out.nbytes()));
     cu::gemv(
         a,
         b,
@@ -76,6 +77,29 @@ void gemm_and_bias(
         encoder);
     return;
   }
+
+  // Pad the output if needed for large enough gemms
+  if (M > 16 && K >= 16 && M >= 16 && N % 8 != 0) {
+    int N_up = ((N + 8 - 1) / 8) * 8;
+    // a, b, c, d+3
+    auto strides = out.strides();
+    strides[out.ndim() - 2] = N_up;
+    for (int i = out.ndim() - 3; i >= 0; --i) {
+      strides[i] = strides[i + 1] * out.shape(i + 1);
+    }
+    size_t data_size = strides[0] * out.shape(0);
+    out.set_data(
+        allocator::malloc(data_size * out.itemsize()),
+        data_size,
+        strides,
+        {false});
+  } else {
+    out.set_data(allocator::malloc(out.nbytes()));
+  }
+  std::cout << "IN A " << a.strides() << " SHAPE " << a.shape() << std::endl;
+  std::cout << "IN B " << b.strides() << " SHAPE " << b.shape() << std::endl;
+  std::cout << "OUT " << out.shape() << " STRIDES " << out.strides()
+            << std::endl;
 
   // Invoke cublasLt
   CublasGemm gemm(
@@ -121,8 +145,6 @@ void Matmul::eval_gpu(const std::vector<array>& inputs, array& out) {
     return;
   }
 
-  out.set_data(allocator::malloc(out.nbytes()));
-
   int M = a_pre.shape(-2);
   int N = b_pre.shape(-1);
   int K = a_pre.shape(-1);
@@ -163,7 +185,6 @@ void AddMM::eval_gpu(const std::vector<array>& inputs, array& out) {
 
   if (beta_ == 1 && a.dtype() != complex64 && c.strides(-1) == 1 &&
       c.data_size() == out.shape(-1)) {
-    out.set_data(allocator::malloc(out.nbytes()));
     gemm_and_bias(
         encoder,
         M,

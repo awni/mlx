@@ -167,6 +167,8 @@ CublasGemm::CublasGemm(
       type, b_cols, b_rows, b_transposed, ldb, batch_count, b_batch_stride);
   b_desc_ = create_matrix_layout(
       type, a_cols, a_rows, a_transposed, lda, batch_count, a_batch_stride);
+  std::cout << "OUT DESC " << b_cols << " " << a_rows << " " << b_cols
+            << std::endl;
   out_desc_ = create_matrix_layout(
       type, b_cols, a_rows, false, b_cols, batch_count, a_rows * b_cols);
 }
