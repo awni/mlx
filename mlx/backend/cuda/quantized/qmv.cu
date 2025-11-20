@@ -15,12 +15,65 @@ namespace cg = cooperative_groups;
 
 static constexpr int rows_per_block = 8;
 
-inline __device__ float4 dequant_fp8(uint32_t bits) {
-  return float4(*(__nv_fp8x4_e4m3*)(&bits));
+template <typename T>
+struct fp2;
+
+template <>
+struct fp2<float> {
+  using value_type = float2;
+  __device__ fp2(float x, float y) : v(make_float2(x, y)) {}
+  __device__ fp2(float2 v) : v(v) {}
+  value_type v;
+};
+
+template <>
+struct fp2<__nv_bfloat16> {
+  __device__ fp2(__nv_bfloat16 x, __nv_bfloat16 y)
+      : v(__halves2bfloat162(x, y)) {}
+  __device__ fp2(__nv_bfloat162 v) : v(v) {}
+  using value_type = __nv_bfloat162;
+  value_type v;
+};
+
+template <>
+struct fp2<__half> {
+  __device__ fp2(__half x, __half y) : v(x, y) {}
+  __device__ fp2(__half2 v) : v(v) {}
+  using value_type = __half2;
+  value_type v;
+};
+
+template <typename T>
+inline __device__ T fma(T a, T b, T c) {
+  if constexpr (std::is_same_v<typename T::value_type, float2>) {
+    return {a.v.x * b.v.x + c.v.x, a.v.y * b.v.y + c.v.y};
+  } else {
+    return __hfma2(a.v, b.v, c.v);
+  }
 }
 
-inline __device__ float2 dequant_fp4(uint8_t bits) {
-  return float2(*(__nv_fp4x2_e2m1*)(&bits));
+template <typename T>
+inline __device__ fp2<T> dequant_fp8(uint16_t bits) {
+  auto fp82 = *(__nv_fp8x2_e4m3*)(&bits);
+  if constexpr (std::is_same_v<T, float>) {
+    return float2(fp82);
+  } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    return __float22bfloat162_rn(float2(fp82));
+  } else {
+    return __half2(fp82);
+  }
+}
+
+template <typename T>
+inline __device__ fp2<T> dequant_fp4(uint8_t bits) {
+  auto fp42 = *(__nv_fp4x2_e2m1*)(&bits);
+  if constexpr (std::is_same_v<T, float>) {
+    return float2(fp42);
+  } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    return __float22bfloat162_rn(float2(fp42));
+  } else {
+    return __half2(fp42);
+  }
 }
 
 template <typename T>
@@ -100,49 +153,36 @@ __device__ void fp_qmv_impl(
           unsafe_load_vector<n_per_thread>(mat + row * packed_cols + col, 0);
       auto local_vec =
           unsafe_load_vector<nv_per_thread>(vec + vals_per_item * col, 0);
-      // #pragma unroll
+#pragma unroll
       for (int i = 0; i < scales_per_step; ++i) {
-        float2 local_sum = {0.0f, 0.0f};
+        fp2<T> local_sum = {T(0.0f), T(0.0f)};
 #pragma unroll
         for (int j = 0; j < n_per_step; ++j) {
           int k = n_per_step * i + j;
           if constexpr (bits == 8) {
-            auto v = dequant_fp8(local_mat[k]);
-            local_sum.x +=
-                v.x * static_cast<float>(local_vec[vals_per_item * k]);
-            local_sum.x +=
-                v.y * static_cast<float>(local_vec[vals_per_item * k + 1]);
-            local_sum.y +=
-                v.z * static_cast<float>(local_vec[vals_per_item * k + 2]);
-            local_sum.y +=
-                v.w * static_cast<float>(local_vec[vals_per_item * k + 3]);
+            auto bytes = (uint16_t*)&local_mat[k];
+#pragma unroll
+            for (int q = 0; q < 2; ++q) {
+              auto v = dequant_fp8<T>(bytes[q]);
+              auto u = fp2<T>(
+                  local_vec[vals_per_item * k + 2 * q],
+                  local_vec[vals_per_item * k + 2 * q + 1]);
+              local_sum = fma(v, u, local_sum);
+            }
           } else {
-            auto v = dequant_fp4(local_mat[k]);
-            local_sum.x +=
-                v.x * static_cast<float>(local_vec[vals_per_item * k]);
-            local_sum.y +=
-                v.y * static_cast<float>(local_vec[vals_per_item * k + 1]);
-
-            v = dequant_fp4(local_mat[k] >> 8);
-            local_sum.x +=
-                v.x * static_cast<float>(local_vec[vals_per_item * k + 2]);
-            local_sum.y +=
-                v.y * static_cast<float>(local_vec[vals_per_item * k + 3]);
-
-            v = dequant_fp4(local_mat[k] >> 16);
-            local_sum.x +=
-                v.x * static_cast<float>(local_vec[vals_per_item * k + 4]);
-            local_sum.y +=
-                v.y * static_cast<float>(local_vec[vals_per_item * k + 5]);
-
-            v = dequant_fp4(local_mat[k] >> 24);
-            local_sum.x +=
-                v.x * static_cast<float>(local_vec[vals_per_item * k + 6]);
-            local_sum.y +=
-                v.y * static_cast<float>(local_vec[vals_per_item * k + 7]);
+            auto bytes = (uint8_t*)&local_mat[k];
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              auto v = dequant_fp4<T>(bytes[q]);
+              auto u = fp2<T>(
+                  local_vec[vals_per_item * k + 2 * q],
+                  local_vec[vals_per_item * k + 2 * q + 1]);
+              local_sum = fma(v, u, local_sum);
+            }
           }
         }
-        sum += (local_sum.x + local_sum.y) * float(scales[i]);
+        sum += static_cast<float>(local_sum.v.x + local_sum.v.y) *
+            float(scales[i]);
       }
       scales += scale_step;
     }
@@ -210,6 +250,28 @@ __global__ void fp_qmv_batched(
       mat, scales, vec, out, rows, cols);
 }
 
+template <typename F>
+void dispatch_n_per_thread(int n, F&& f) {
+  switch (n) {
+    case 1:
+      f(std::integral_constant<int, 1>{});
+      break;
+    case 2:
+      f(std::integral_constant<int, 2>{});
+      break;
+    case 4:
+      f(std::integral_constant<int, 4>{});
+      break;
+  }
+}
+
+template <int n, typename U, typename T>
+inline bool check_alignment(U* mat_ptr, T* vec_ptr, int bits) {
+  return cu::is_aligned<n>(mat_ptr) &&
+      ((bits == 4 && cu::is_aligned<2 * n>(vec_ptr)) ||
+       cu::is_aligned<n>(vec_ptr));
+}
+
 void fp_qmv(
     const array& mat,
     const array& scales,
@@ -233,14 +295,18 @@ void fp_qmv(
       uint blocks_y = (N + rows_per_block - 1) / rows_per_block;
       const uint32_t* mat_ptr = gpu_ptr<uint32_t>(mat);
       const T* vec_ptr = gpu_ptr<T>(vec);
-      // TODO deal with multiple of 16 but not 32
-      bool aligned = cu::is_aligned<4>(mat_ptr);
-      aligned &=
-          ((bits == 4 && cu::is_aligned<8>(vec_ptr)) ||
-           cu::is_aligned<4>(vec_ptr));
-      dispatch_bool(aligned, [&](auto aligned) {
+      int n = 1;
+      if (check_alignment<4>(mat_ptr, vec_ptr, bits)) {
+        n = 4;
+        if (group_size == 16 && K % 32 != 0) {
+          n = 2;
+        }
+      } else if (check_alignment<2>(mat_ptr, vec_ptr, bits)) {
+        n = 2;
+      }
+      dispatch_n_per_thread(n, [&](auto npt) {
         dispatch_bool(B > 1, [&](auto batched) {
-          constexpr int n = aligned() ? 4 : 1;
+          constexpr int n = npt();
           if (!batched()) {
             auto kernel = fp_qmv_single<T, rows_per_block, n, 4, 32, true>;
             if (bits == 8) {
