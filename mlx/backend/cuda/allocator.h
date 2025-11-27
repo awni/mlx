@@ -3,13 +3,13 @@
 #pragma once
 
 #include "mlx/allocator.h"
-#include "mlx/backend/common/buffer_cache.h"
 #include "mlx/backend/cuda/cuda_utils.h"
 
 #include <cuda_runtime.h>
 #include <mutex>
 #include <set>
 #include <utility>
+#include <vector>
 
 namespace mlx::core::cu {
 
@@ -72,10 +72,12 @@ class CudaAllocator : public allocator::Allocator {
   std::mutex mutex_;
   size_t memory_limit_;
   size_t max_pool_size_;
-  BufferCache<CudaBuffer> buffer_cache_;
   size_t active_memory_{0};
   size_t peak_memory_{0};
   std::vector<cudaStream_t> free_streams_;
+  std::vector<cudaMemPool_t> pools_;
+  cudaMemPool_t managed_pool_;
+  cudaStream_t managed_stream_;
   SmallSizePool scalar_pool_;
 };
 

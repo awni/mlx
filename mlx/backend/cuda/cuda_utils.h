@@ -5,6 +5,7 @@
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cassert>
 
 namespace mlx::core {
 
